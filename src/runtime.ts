@@ -3,6 +3,8 @@ import { Context, Effect, Predicate, Schema, SchemaParser, SchemaTransformation,
 import { normalizeShellID } from "./config.js"
 import type { ShellProfile, ShellSnapshot } from "./probe.js"
 
+export { shellShortName } from "./shell-name.js"
+
 export interface ShellCallContext {
   readonly requested?: { readonly id: string; readonly executable: string }
   resolved?: string
@@ -34,11 +36,6 @@ export function defaultShellFromDescription(description: string): string | undef
 
 function describedDefaultShell(description: string): string | undefined {
   return rewrittenDefault.exec(description)?.[2]?.trim() || defaultShellFromDescription(description)
-}
-
-export function shellShortName(executable: string): string {
-  const name = executable.trim().split(/[\\/]/u).pop() ?? executable.trim()
-  return name.replace(/\.(?:exe|cmd|bat)$/iu, "").toLowerCase()
 }
 
 export function shellDescription(description: string, ids: readonly string[], defaultShell?: string) {
