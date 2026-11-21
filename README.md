@@ -13,6 +13,21 @@ OpenCode v2 内置 `shell` 工具的逐次调用 Shell 选择插件（`o3p.tool.
 - 通过原生 `session.instructions.entry` 发布可用项和已观察到的默认 Shell：首轮 prompt 前进入初始指令基线，后续变化进入原生指令增量；按会话指纹去重并限制跟踪表大小。
 - 在 `context` / `compaction` / `generate` 中同步工具描述与 JSON Schema，保留原生默认 Shell 名称；配置中途变更会自动发布新的指令 entry。
 - 远程 workspace 不注册本插件，因为服务端无法探测远端机器的可执行文件。
+- 可选 `./tui` 入口与服务端共用插件 ID；在支持 TUI 设置与工具卡片装饰接口的宿主中自动提供 Shell 卡片标题和实时显示设置。
+
+## TUI 卡片显示（可选）
+
+服务端行为在官方 OpenCode v2 上 **100% 独立工作，无需任何前端补丁**。服务端插件激活后，支持 `ui.settings.register` 与 `ui.tools.decorate` 的 TUI 宿主会自动发现 `./tui`；官方未补丁 TUI 缺少这些接口时会完全静默地跳过 TUI 设置，不影响服务端功能。
+
+支持相应接口时，Settings 对话框会出现 **Shell** 分类：
+
+| 设置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `Header` | `on` | 在 Shell 工具卡片标题中显示 Shell 短名 |
+| `Header spacing` | `off` | 在标题与命令之间显示一个空行 |
+| `Workdir` | `header` | `header` 显示 `# pwsh in <dir>` 并省略命令前的 `cd`；`command` 保留原生命令前缀 `$ cd <dir> && <cmd>` |
+
+关闭 `Header` 后仍可单独保留 workdir 标题（`# in <dir>`）；同时选择 `Workdir = command` 则恢复完全原生的卡片渲染。
 
 ## 安装与构建
 
@@ -104,7 +119,7 @@ bun run smoke
 bun run test:host
 ```
 
-- `smoke` 导入实际构建的 `dist/server.js`，检查导出与禁用模式，在 harness 中验证选择/透传，并用探测到的真实 Shell 执行命令。
+- `smoke` 导入实际构建的 `dist/server.js` 与 `dist/tui.js`，检查导出、TUI 依赖隔离及官方前端上的静默降级，并在 harness 中验证选择/透传与禁用模式，用探测到的真实 Shell 执行命令。
 - `test:host` 直接加载 OpenCode 2.3.2 的 `Tool.runtime`、`PluginHooks` 与 Effect Layer，验证真实 Schema 转换、解码、并发隔离和 Shell 消失处理；需要设置 `OPENCODE_SOURCE_DIR=/path/to/opencode`。
 
 在 OpenCode v2 中快速手测：挂载插件后打开一个新会话，让模型分别执行一次带 `"shell":"bash"`（或当前枚举中的其他值）和一次省略 `shell` 的调用；再请求一个不存在的 ID，应看到列出当前可用 Shell 的工具错误。开启 `full_codemode` 时，可在 `execute` 中调用 `tools.shell` 做同样验证。
