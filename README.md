@@ -1,0 +1,114 @@
+# opencode-shell-select
+
+OpenCode v2 内置 `shell` 工具的逐次调用 Shell 选择插件（`o3p.tool.shell-select`）。同时支持直接工具调用与 `full_codemode` 中的 `tools.shell`，不改变 OpenCode 原有的默认 Shell 配置。
+
+## 功能
+
+- 为 `shell` 增加可选 `shell` 参数，枚举值来自当前实际可执行的 Shell 探测结果。
+- **省略参数即完全透传**：保留 `opencode.jsonc` 的默认 Shell、原生 `output`、`content`、`freeform`、`options` 与结构化输出。
+- 每次执行都在 `result.metadata.shell` 记录实际 Shell：显式选择记录规范 profile ID，默认透传记录可执行文件短名（如 `bash` / `pwsh`），同时保留原生的其他 metadata。
+- Windows 支持 Git Bash（含 `OPENCODE_GIT_BASH_PATH`）、PowerShell、CMD 和 WindowsApps App Execution Alias；POSIX 支持 Bash、Zsh、sh、dash、ksh、pwsh及自定义配置。
+- 使用每次调用独立的 fiber-local `Context.Reference` 状态盒与原生 `shell.create.before` hook；显式选择、默认调用及无关 `Shell.create` 并行时，`event.shell` 和结果 metadata 均互不串扰。
+- 每次显式选择都在执行前检查目标是否仍然存在；失效后会刷新缓存、重载工具并返回列出当前可用项的 `Tool.Error`，**不会静默退回默认 Shell**。
+- 通过原生 `session.instructions.entry` 发布可用项和已观察到的默认 Shell：首轮 prompt 前进入初始指令基线，后续变化进入原生指令增量；按会话指纹去重并限制跟踪表大小。
+- 在 `context` / `compaction` / `generate` 中同步工具描述与 JSON Schema，保留原生默认 Shell 名称；配置中途变更会自动发布新的指令 entry。
+- 远程 workspace 不注册本插件，因为服务端无法探测远端机器的可执行文件。
+
+## 安装与构建
+
+需要 Bun 与 OpenCode v2；源码审计及真实宿主验证基线为 OpenCode `2.3.2`。
+
+```bash
+bun install
+bun run build
+```
+
+在 OpenCode v2 的 `opencode.jsonc` 中挂载本目录：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "/绝对路径/opencode-shell-select",
+      "options": {
+        "enabled": true,
+        "shells": ["bash", "sh", "pwsh"],
+        "cacheTtlMs": 60000
+      }
+    }
+  ]
+}
+```
+
+直接工具调用示例：
+
+```json
+{
+  "command": "printf 'bash-ok\\n'",
+  "shell": "bash"
+}
+```
+
+Code Mode 示例：
+
+```ts
+const result = await tools.shell({
+  command: "printf 'sh-ok\\n'",
+  shell: "sh"
+})
+return result
+```
+
+不传 `shell` 时仍由 OpenCode 原生配置决定解释器。
+
+## 配置
+
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | `false` 时不注册任何 transform、hook 或事件订阅 |
+| `shells` | 自动探测 | 字符串数组为**允许列表**，替代内置候选；对象则与内置候选合并，可覆盖路径、描述或禁用项 |
+| `cacheTtlMs` | `60000` | 探测缓存 TTL，`0` 表示每次非粘性读取都重新探测；显式执行前的存活检查不受 TTL 影响 |
+| `instructionKey` | `"o3p.shell-select"` | 原生指令 entry key，须匹配 `^[a-z0-9][a-z0-9._-]*$` |
+| `probeOnRequest` | `true` | 是否在 prompt / 模型上下文准备时读取并刷新过期探测缓存 |
+
+对象形式的完整示例：
+
+```jsonc
+{
+  "shells": {
+    // 覆盖内置 bash；Windows 也可设为 C:/Program Files/Git/bin/bash.exe
+    "bash": {
+      "path": "/bin/bash",
+      "description": "GNU Bash"
+    },
+    "pwsh": { "enabled": true },
+    "zsh": { "enabled": false },
+    "corporate-sh": {
+      "path": "/opt/company/bin/sh",
+      "description": "Company-managed shell"
+    }
+  }
+}
+```
+
+配置字段独立容错：某个值无效只回退该字段，不会把 `enabled: false` 等其他有效配置一起重置。
+
+## 验证
+
+```bash
+bun run typecheck
+bun test
+bun run build
+bun run smoke
+bun run test:host
+```
+
+- `smoke` 导入实际构建的 `dist/server.js`，检查导出与禁用模式，在 harness 中验证选择/透传，并用探测到的真实 Shell 执行命令。
+- `test:host` 直接加载 OpenCode 2.3.2 的 `Tool.runtime`、`PluginHooks` 与 Effect Layer，验证真实 Schema 转换、解码、并发隔离和 Shell 消失处理；需要设置 `OPENCODE_SOURCE_DIR=/path/to/opencode`。
+
+在 OpenCode v2 中快速手测：挂载插件后打开一个新会话，让模型分别执行一次带 `"shell":"bash"`（或当前枚举中的其他值）和一次省略 `shell` 的调用；再请求一个不存在的 ID，应看到列出当前可用 Shell 的工具错误。开启 `full_codemode` 时，可在 `execute` 中调用 `tools.shell` 做同样验证。
+
+## 许可
+
+[MIT](LICENSE)
