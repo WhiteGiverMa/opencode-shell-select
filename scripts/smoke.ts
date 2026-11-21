@@ -5,6 +5,7 @@ import { Effect } from "effect"
 import { parseConfig } from "../src/config.js"
 import { probeShells, system, type ShellProfile } from "../src/probe.js"
 import { id, registerShellSelect } from "../src/server.js"
+import type { ShellSelectTuiContext } from "../src/tui.js"
 import { makeHarness, toolContext } from "../test/harness.js"
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -15,6 +16,15 @@ type BuiltModule = {
   readonly default: Plugin
   readonly id: string
   readonly registerShellSelect: typeof registerShellSelect
+}
+
+type BuiltTuiModule = {
+  readonly default: {
+    readonly id: string
+    readonly setup: (
+      context: ShellSelectTuiContext,
+    ) => void | (() => void) | Promise<void | (() => void)>
+  }
 }
 
 const artifactURL = new URL("../dist/server.js", import.meta.url)
@@ -30,6 +40,32 @@ assert(built.id === "o3p.tool.shell-select", "named plugin ID is incorrect")
 assert(built.default.id === id, "default export has the wrong plugin ID")
 assert(typeof built.default.effect === "function", "default export has no Effect setup function")
 assert(typeof built.registerShellSelect === "function", "registration helper is missing")
+
+const tuiArtifactURL = new URL("../dist/tui.js", import.meta.url)
+const tuiArtifact = await readFile(tuiArtifactURL, "utf8").catch(() => {
+  throw new Error("smoke: dist/tui.js is missing; run `bun run build` first")
+})
+assert(/from\s*["']@opencode\/plugin\/tui["']/u.test(tuiArtifact), "TUI plugin API must remain external")
+assert(
+  !/from\s*["'](?:effect|which)(?:["']|\/)|require\(["'](?:effect|which)["']\)/u.test(tuiArtifact),
+  "TUI bundle must not import effect or which",
+)
+const builtTui = (await import(tuiArtifactURL.href)) as unknown as BuiltTuiModule
+assert(builtTui.default.id === "o3p.tool.shell-select", "TUI plugin ID is incorrect")
+assert(typeof builtTui.default.setup === "function", "TUI default export has no setup function")
+
+let storageRead = false
+const officialCleanup = await builtTui.default.setup({
+  storage: {
+    store<Value extends object>(_key: string, _options: { readonly initial: Value }) {
+      storageRead = true
+      throw new Error("official frontend smoke must not allocate settings storage")
+    },
+  },
+  ui: {},
+})
+assert(officialCleanup === undefined, "official frontend no-op returned a cleanup")
+assert(!storageRead, "official frontend no-op touched settings storage")
 
 const names = process.platform === "win32" ? ["cmd", "powershell", "pwsh", "bash"] : ["sh", "bash", "zsh"]
 const options = { shells: names, cacheTtlMs: 60_000 }
