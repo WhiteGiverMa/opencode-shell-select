@@ -1,11 +1,11 @@
 export {}
 
-const server = await Bun.build({
-  entrypoints: ["./src/server.ts"],
+const build = await Bun.build({
+  entrypoints: ["./src/server.ts", "./src/tui.ts"],
   outdir: "./dist",
   target: "node",
-  external: ["@opencode/plugin", "@opencode/plugin/*", "effect", "effect/*"],
+  external: ["@opencode/plugin", "@opencode/plugin/*", "effect", "effect/*", "solid-js", "solid-js/*"],
 })
 
-if (!server.success) throw new AggregateError(server.logs, "Server build failed")
-console.log("built: dist/server.js")
+if (!build.success) throw new AggregateError(build.logs, "Plugin build failed")
+console.log("built: dist/server.js, dist/tui.js")
