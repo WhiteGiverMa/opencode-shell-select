@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { win32 } from "node:path"
 import { parseConfig } from "../src/config.js"
-import { isLive, makeProbeCache, probeShells, system, type ProbeSystem } from "../src/probe.js"
+import { isLive, makeProbeCache, predictDefaultShell, probeShells, system, type ProbeSystem } from "../src/probe.js"
 
 function fakeIO(input: {
   readonly platform?: NodeJS.Platform
@@ -192,6 +192,50 @@ describe("probe cache", () => {
     expect(isLive(io, "/bin/sh")).toBe(true)
     live.delete("/bin/sh")
     expect(isLive(io, "/bin/sh")).toBe(false)
+  })
+})
+
+describe("predictDefaultShell", () => {
+  test("reads global and project opencode.jsonc with project precedence", () => {
+    const files: Record<string, string> = {
+      "C:\\Users\\demo\\.config\\opencode\\opencode.jsonc": `{\n  // comment\n  "shell": "bash",\n}`,
+      "C:\\repo\\opencode.json": `{"shell": "pwsh"}`,
+    }
+    const { io } = fakeIO({
+      platform: "win32",
+      env: { COMSPEC: "C:\\Windows\\System32\\cmd.exe" },
+      which: {
+        git: "C:\\Program Files\\Git\\cmd\\git.exe",
+        pwsh: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      },
+      paths: [
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        "C:\\Windows\\System32\\cmd.exe",
+      ],
+    })
+    const withFiles: ProbeSystem = {
+      ...io,
+      home: "C:\\Users\\demo",
+      readFile: (file) => files[file],
+    }
+    expect(predictDefaultShell(withFiles, "C:\\other")).toBe("bash")
+    expect(predictDefaultShell(withFiles, "C:\\repo\\sub")).toBe("pwsh")
+  })
+
+  test("falls back past denied or missing configured shells to platform defaults", () => {
+    const { io } = fakeIO({
+      platform: "linux",
+      env: { SHELL: "/usr/bin/zsh" },
+      which: { zsh: "/usr/bin/zsh", bash: "/bin/bash" },
+      paths: ["/usr/bin/zsh", "/bin/bash"],
+    })
+    const withFish: ProbeSystem = {
+      ...io,
+      home: "/home/demo",
+      readFile: (file) => (file === "/home/demo/.config/opencode/opencode.json" ? `{"shell":"fish"}` : undefined),
+    }
+    expect(predictDefaultShell(withFish, "/work")).toBe("zsh")
   })
 })
 

@@ -3,7 +3,7 @@ import { define, type Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Effect, Semaphore, Stream, type Scope } from "effect"
 import { parseConfig } from "./config.js"
-import { isLive, makeProbeCache, system, type ProbeSystem, type ShellProfile } from "./probe.js"
+import { isLive, makeProbeCache, predictDefaultShell, system, type ProbeSystem, type ShellProfile } from "./probe.js"
 import {
   defaultShellFromDescription,
   renderInstructionPayload,
@@ -37,7 +37,7 @@ export const registerShellSelect = Effect.fnUntraced(function* (
 
   const cache = makeProbeCache(config, io, now)
   let current = cache.read()
-  let defaultShell: string | undefined
+  let defaultShell: string | undefined = predictDefaultShell(io, ctx.location.directory)
   let active = true
   let wrapped = false
   const ids = () => current.available.map((profile) => profile.id)

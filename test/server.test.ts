@@ -190,34 +190,35 @@ describe("instruction entry lifecycle", () => {
     )
   })
 
-  test("observing and changing the native default shell publishes chronological instruction updates", async () => {
+  test("predicts the default shell at boot and publishes an update only when it changes", async () => {
     const { harness, register } = setup()
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
           yield* register()
           const sessionID = Session.ID.create()
+          // Turn 1 prompt already carries the predicted default shell (`bash`), so matching context does NOT re-put.
           yield* harness.fireSession("prompt", promptEvent(sessionID))
           expect(harness.puts).toHaveLength(1)
-          expect(String(harness.puts[0]?.value)).not.toContain("Default shell when `shell` is omitted:")
+          expect(String(harness.puts[0]?.value)).toContain("Default shell when `shell` is omitted: bash.")
 
           const first = { ...contextEvent(harness.shell()), sessionID }
           first.tools.shell!.description = "Execute. Commands run on Linux using bash."
           yield* harness.fireSession("context", first)
-          expect(harness.puts).toHaveLength(2)
-          expect(String(harness.puts[1]?.value)).toContain("Default shell when `shell` is omitted: bash.")
+          expect(harness.puts).toHaveLength(1)
           expect(first.tools.shell?.description).toContain("using bash by default")
 
           yield* harness.fireSession("context", first)
-          expect(harness.puts).toHaveLength(2)
+          expect(harness.puts).toHaveLength(1)
           expect(first.tools.shell?.description.match(/Set the optional/gu)).toHaveLength(1)
 
+          // If OpenCode's actual default shell differs or changes later, an update IS published.
           const changed = { ...contextEvent(harness.shell()), sessionID }
           changed.tools.shell!.description = "Execute. Commands run on Linux using pwsh."
           yield* harness.fireSession("context", changed)
-          expect(harness.puts).toHaveLength(3)
-          expect(String(harness.puts[2]?.value)).toContain("Default shell when `shell` is omitted: pwsh.")
-          expect(String(harness.puts[2]?.value)).not.toContain("omitted: bash.")
+          expect(harness.puts).toHaveLength(2)
+          expect(String(harness.puts[1]?.value)).toContain("Default shell when `shell` is omitted: pwsh.")
+          expect(String(harness.puts[1]?.value)).not.toContain("omitted: bash.")
           expect(changed.tools.shell?.description).toContain("using pwsh by default")
         }),
       ),
@@ -250,7 +251,7 @@ describe("instruction entry lifecycle", () => {
     )
   })
 
-  test("reloading the plugin does not overwrite an existing instruction entry with a generic fallback", async () => {
+  test("reloading the plugin does not re-publish an unchanged persisted instruction entry", async () => {
     const { harness, io, now, register } = setup({ shells: ["bash", "sh"], cacheTtlMs: 60_000 })
     const sessionID = Session.ID.create()
     await Effect.runPromise(
@@ -261,8 +262,8 @@ describe("instruction entry lifecycle", () => {
           const ctxEvent = { ...contextEvent(harness.shell()), sessionID }
           ctxEvent.tools.shell!.description = "Execute. Commands run on Linux using bash."
           yield* harness.fireSession("context", ctxEvent)
-          expect(harness.puts).toHaveLength(2)
-          expect(String(harness.puts[1]?.value)).toContain("Default shell when `shell` is omitted: bash.")
+          expect(harness.puts).toHaveLength(1)
+          expect(String(harness.puts[0]?.value)).toContain("Default shell when `shell` is omitted: bash.")
         }),
       ),
     )
@@ -273,11 +274,11 @@ describe("instruction entry lifecycle", () => {
         Effect.gen(function* () {
           yield* registerShellSelect(harness.ctx, io, now)
           yield* harness.fireSession("prompt", promptEvent(sessionID))
-          expect(harness.puts).toHaveLength(2)
+          expect(harness.puts).toHaveLength(1)
           const ctxEvent = { ...contextEvent(harness.shell()), sessionID }
           ctxEvent.tools.shell!.description = "Execute. Commands run on Linux using bash."
           yield* harness.fireSession("context", ctxEvent)
-          expect(harness.puts).toHaveLength(2)
+          expect(harness.puts).toHaveLength(1)
         }),
       ),
     )

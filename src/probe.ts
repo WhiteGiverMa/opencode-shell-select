@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto"
-import { accessSync, constants, existsSync, lstatSync, statSync } from "node:fs"
+import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from "node:fs"
+import { homedir } from "node:os"
 import { posix, win32 } from "node:path"
 import which from "which"
 import type { Config } from "./config.js"
+import { shellShortName } from "./shell-name.js"
 
 const WINDOWS = ["bash", "pwsh", "powershell", "cmd"]
 const POSIX = ["bash", "zsh", "sh", "dash", "ksh", "pwsh"]
@@ -28,11 +30,14 @@ export interface ProbeSystem {
   readonly which: (name: string) => string | undefined
   readonly isExecutable: (file: string) => boolean
   readonly isAppExecutionAlias: (file: string) => boolean
+  readonly readFile?: (file: string) => string | undefined
+  readonly home?: string
 }
 
 export const system: ProbeSystem = {
   platform: process.platform,
   env: process.env,
+  home: homedir(),
   which: (name) =>
     which.sync(name, {
       nothrow: true,
@@ -53,6 +58,13 @@ export const system: ProbeSystem = {
       return lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink() === true && existsSync(file)
     } catch {
       return false
+    }
+  },
+  readFile(file) {
+    try {
+      return readFileSync(file, "utf8")
+    } catch {
+      return undefined
     }
   },
 }
@@ -136,6 +148,130 @@ export function probeShells(config: Config, io: ProbeSystem, checkedAt: number):
   }
   const fingerprint = createHash("sha256").update(JSON.stringify([platform, available, unavailable])).digest("hex")
   return { checkedAt, platform, available, unavailable, fingerprint }
+}
+
+const DENIED_DEFAULT_SHELLS = new Set(["fish", "nu"])
+
+function extractJsoncShell(text: string): string | undefined {
+  // Strip block and line comments outside string literals, then parse top-level `"shell": "..."`.
+  let out = ""
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    const next = text[i + 1]
+    if (inString) {
+      out += ch
+      if (escaped) escaped = false
+      else if (ch === "\\") escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      out += ch
+      continue
+    }
+    if (ch === "/" && next === "/") {
+      i += 1
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++
+      continue
+    }
+    if (ch === "/" && next === "*") {
+      i += 2
+      while (i + 1 < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++
+      i += 1
+      continue
+    }
+    out += ch
+  }
+  // Remove trailing commas before `}` or `]` for lenient JSONC parsing.
+  const cleaned = out.replace(/,(\s*[}\]])/gu, "$1")
+  try {
+    const parsed: unknown = JSON.parse(cleaned)
+    if (typeof parsed === "object" && parsed !== null && "shell" in parsed && typeof parsed.shell === "string") {
+      const value = parsed.shell.trim()
+      return value || undefined
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+function configuredShellFromFiles(io: ProbeSystem, directory?: string): string | undefined {
+  if (!io.readFile) return undefined
+  const windows = io.platform === "win32"
+  const path = windows ? win32 : posix
+  const candidates: string[] = []
+  const configDir =
+    io.env.OPENCODE_CONFIG_DIR ||
+    (io.env.XDG_CONFIG_HOME
+      ? path.join(io.env.XDG_CONFIG_HOME, "opencode")
+      : io.home
+        ? path.join(io.home, ".config", "opencode")
+        : undefined)
+  if (configDir) {
+    candidates.push(path.join(configDir, "opencode.json"), path.join(configDir, "opencode.jsonc"))
+  }
+  if (directory) {
+    const ancestors: string[] = []
+    let current = path.resolve(directory)
+    while (true) {
+      ancestors.push(current)
+      const parent = path.dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+    for (const dir of ancestors.reverse()) {
+      candidates.push(
+        path.join(dir, "opencode.json"),
+        path.join(dir, "opencode.jsonc"),
+        path.join(dir, ".opencode", "opencode.json"),
+        path.join(dir, ".opencode", "opencode.jsonc"),
+      )
+    }
+  }
+  let latest: string | undefined
+  for (const file of candidates) {
+    const raw = io.readFile(file)
+    if (raw === undefined) continue
+    const configured = extractJsoncShell(raw)
+    if (configured !== undefined) latest = configured
+  }
+  return latest
+}
+
+/**
+ * Predict OpenCode's default compatible shell at plugin boot (matching ShellSelect.resolve({ priority: "compat" }))
+ * so the very first session's prompt baseline already carries the default shell name.
+ * Still refined/superseded whenever `session.hook("context")` observes OpenCode's native shell description.
+ */
+export function predictDefaultShell(io: ProbeSystem, directory?: string): string | undefined {
+  const resolveCompatible = (candidate: string | undefined): string | undefined => {
+    if (!candidate) return undefined
+    const short = shellShortName(candidate)
+    if (!short || DENIED_DEFAULT_SHELLS.has(short)) return undefined
+    const executable = resolveProfile(io, short, candidate === short ? undefined : candidate)
+    return executable ? shellShortName(executable) : undefined
+  }
+
+  const configured = configuredShellFromFiles(io, directory)
+  const fromConfig = resolveCompatible(configured)
+  if (fromConfig) return fromConfig
+
+  const fromEnv = resolveCompatible(io.env.SHELL)
+  if (fromEnv) return fromEnv
+
+  if (io.platform === "win32") {
+    for (const candidate of ["pwsh", "powershell", "bash", "cmd"]) {
+      const executable = resolveProfile(io, candidate, undefined)
+      if (executable) return shellShortName(executable)
+    }
+    return undefined
+  }
+  if (io.platform === "darwin") return "zsh"
+  return resolveProfile(io, "bash", undefined) ? "bash" : "sh"
 }
 
 export function makeProbeCache(config: Config, io = system, now = Date.now) {

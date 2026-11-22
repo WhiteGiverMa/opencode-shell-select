@@ -10,8 +10,7 @@ OpenCode v2 内置 `shell` 工具的逐次调用 Shell 选择插件（`o3p.tool.
 - Windows 支持 Git Bash（含 `OPENCODE_GIT_BASH_PATH`）、PowerShell、CMD 和 WindowsApps App Execution Alias；POSIX 支持 Bash、Zsh、sh、dash、ksh、pwsh及自定义配置。
 - 使用每次调用独立的 fiber-local `Context.Reference` 状态盒与原生 `shell.create.before` hook；显式选择、默认调用及无关 `Shell.create` 并行时，`event.shell` 和结果 metadata 均互不串扰。
 - 每次显式选择都在执行前检查目标是否仍然存在；失效后会刷新缓存、重载工具并返回列出当前可用项的 `Tool.Error`，**不会静默退回默认 Shell**。
-- 通过原生 `session.instructions.entry` 发布可用项和已观察到的默认 Shell：首轮 prompt 前进入初始指令基线，后续变化进入原生指令增量；按会话指纹去重并限制跟踪表大小。
-  - **预期行为提示**：服务端冷启动（或插件初次加载）后的**第一个全新会话**会在首轮结束/第二轮前出现一次 `Instructions updated: api/o3p.shell-select`——这是因为默认 Shell 名称在首次 `context` 钩子从原生工具描述里观察到，随后会把 `Default shell when shell is omitted: <name>.` 补齐进指令 entry。观察完成后，同一服务端进程下的后续新会话首轮即写入完整基线，插件热重载也不会覆盖已有持久化 entry；之后仅当可用 Shell 列表或默认 Shell 配置真正变化时才会再次触发该提示。
+- 通过原生 `session.instructions.entry` 发布可用项和默认 Shell：插件加载时即参照 OpenCode 的配置/环境规则预判默认 Shell，使首个全新会话的第一轮就能直接把完整内容写入初始指令基线（不会在首轮无故弹出 `Instructions updated`）；同时保留与 `context` 钩子的校对机制，仅当可用 Shell 列表或默认 Shell 配置真正变化（或与预判不一致）时才发布原生指令增量。按会话指纹去重、热重载不覆盖已有持久化 entry，并限制跟踪表大小。
 - 在 `context` / `compaction` / `generate` 中同步工具描述与 JSON Schema，保留原生默认 Shell 名称；配置中途变更会自动发布新的指令 entry。
 - 远程 workspace 不注册本插件，因为服务端无法探测远端机器的可执行文件。
 - 可选 `./tui` 入口与服务端共用插件 ID；在支持 TUI 设置与工具卡片装饰接口的宿主中自动提供 Shell 卡片标题和实时显示设置。
