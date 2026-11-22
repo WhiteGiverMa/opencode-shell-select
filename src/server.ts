@@ -69,11 +69,28 @@ export const registerShellSelect = Effect.fnUntraced(function* (
         const fingerprint = `${snapshot.fingerprint}:${observedDefault ?? ""}`
         const previous = published.get(sessionID)
         if (previous !== fingerprint) {
+          const nextValue = renderInstructionPayload(snapshot, observedDefault)
+          // After a plugin reload or server restart, `published` is empty even though the DB
+          // still holds the entry. If `defaultShell` hasn't been observed yet (prompt hook runs
+          // before the first context hook), do not clobber an existing persisted entry with a
+          // less-specific payload—wait for context/execution to observe `defaultShell` first.
+          if (previous === undefined) {
+            const existing = yield* ctx.session.instructions.entry.list({ sessionID }).pipe(
+              Effect.map((entries) => entries.find((item) => item.key === config.instructionKey)?.value),
+              Effect.catch(() => Effect.succeed(undefined)),
+              Effect.catchDefect(() => Effect.succeed(undefined)),
+            )
+            if (existing === nextValue) {
+              rememberPublished(sessionID, fingerprint)
+              return
+            }
+            if (observedDefault === undefined && existing !== undefined) return
+          }
           const written = yield* ctx.session.instructions.entry
             .put({
               sessionID,
               key: config.instructionKey,
-              value: renderInstructionPayload(snapshot, observedDefault),
+              value: nextValue,
             })
             .pipe(
               Effect.as(true),
@@ -86,15 +103,19 @@ export const registerShellSelect = Effect.fnUntraced(function* (
             )
           if (!written || !active) return
         }
-        // Map insertion order is a small LRU, so active sessions are not evicted by old ones.
-        published.delete(sessionID)
-        published.set(sessionID, fingerprint)
-        if (published.size > maxTrackedSessions) {
-          const oldest = published.keys().next()
-          if (!oldest.done) published.delete(oldest.value)
-        }
+        rememberPublished(sessionID, fingerprint)
       }),
     )
+
+  const rememberPublished = (sessionID: SessionID, fingerprint: string) => {
+    // Map insertion order is a small LRU, so active sessions are not evicted by old ones.
+    published.delete(sessionID)
+    published.set(sessionID, fingerprint)
+    if (published.size > maxTrackedSessions) {
+      const oldest = published.keys().next()
+      if (!oldest.done) published.delete(oldest.value)
+    }
+  }
 
   const unavailable = (requested: string, reason: string) =>
     new Tool.Error({

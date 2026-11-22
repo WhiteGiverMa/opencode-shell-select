@@ -204,7 +204,13 @@ export function makeHarness(options: {
       hook: sessionHook,
       instructions: {
         entry: {
-          list: () => Effect.die("unused instruction list"),
+          list: (input) =>
+            Effect.sync(() => {
+              const prefix = `${input.sessionID}/`
+              return [...instructionValues.entries()]
+                .filter(([key]) => key.startsWith(prefix))
+                .map(([key, value]) => ({ key: key.slice(prefix.length), value })) as never
+            }),
           remove: () => Effect.die("unused instruction remove"),
           put: (input) =>
             Effect.sync(() => {

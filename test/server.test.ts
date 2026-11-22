@@ -250,6 +250,39 @@ describe("instruction entry lifecycle", () => {
     )
   })
 
+  test("reloading the plugin does not overwrite an existing instruction entry with a generic fallback", async () => {
+    const { harness, io, now, register } = setup({ shells: ["bash", "sh"], cacheTtlMs: 60_000 })
+    const sessionID = Session.ID.create()
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* register()
+          yield* harness.fireSession("prompt", promptEvent(sessionID))
+          const ctxEvent = { ...contextEvent(harness.shell()), sessionID }
+          ctxEvent.tools.shell!.description = "Execute. Commands run on Linux using bash."
+          yield* harness.fireSession("context", ctxEvent)
+          expect(harness.puts).toHaveLength(2)
+          expect(String(harness.puts[1]?.value)).toContain("Default shell when `shell` is omitted: bash.")
+        }),
+      ),
+    )
+
+    // Simulate plugin hot reload / server restart: fresh in-memory state, persisted DB entry kept.
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* registerShellSelect(harness.ctx, io, now)
+          yield* harness.fireSession("prompt", promptEvent(sessionID))
+          expect(harness.puts).toHaveLength(2)
+          const ctxEvent = { ...contextEvent(harness.shell()), sessionID }
+          ctxEvent.tools.shell!.description = "Execute. Commands run on Linux using bash."
+          yield* harness.fireSession("context", ctxEvent)
+          expect(harness.puts).toHaveLength(2)
+        }),
+      ),
+    )
+  })
+
   test("session deletion forgets dedup state without affecting other sessions", async () => {
     const { harness, register } = setup()
     await Effect.runPromise(
@@ -261,6 +294,8 @@ describe("instruction entry lifecycle", () => {
           yield* harness.fireSession("prompt", promptEvent(deleted))
           yield* harness.fireSession("prompt", promptEvent(retained))
           expect(harness.puts).toHaveLength(2)
+          // Clear persisted entry as real session deletion would.
+          harness.instructionValues.delete(`${deleted}/o3p.shell-select`)
           yield* Effect.promise(() => harness.emitDeleted(deleted))
           yield* Effect.promise(() => harness.flushEvents())
           yield* harness.fireSession("prompt", promptEvent(deleted))
@@ -286,6 +321,8 @@ describe("instruction entry lifecycle", () => {
           if (!first || !last) throw new Error("session fixtures missing")
           yield* harness.fireSession("prompt", promptEvent(last))
           expect(harness.puts).toHaveLength(maxTrackedSessions + 1)
+          // Evicted session re-checks DB; if entry was removed externally it re-publishes, if unchanged it skips.
+          harness.instructionValues.delete(`${first}/o3p.shell-select`)
           yield* harness.fireSession("prompt", promptEvent(first))
           expect(harness.puts).toHaveLength(maxTrackedSessions + 2)
         }),
