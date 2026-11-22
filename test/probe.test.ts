@@ -223,7 +223,7 @@ describe("predictDefaultShell", () => {
     expect(predictDefaultShell(withFiles, "C:\\repo\\sub")).toBe("pwsh")
   })
 
-  test("falls back past denied or missing configured shells to platform defaults", () => {
+  test("falls back past denied or missing configured shells directly to platform defaults", () => {
     const { io } = fakeIO({
       platform: "linux",
       env: { SHELL: "/usr/bin/zsh" },
@@ -235,7 +235,8 @@ describe("predictDefaultShell", () => {
       home: "/home/demo",
       readFile: (file) => (file === "/home/demo/.config/opencode/opencode.json" ? `{"shell":"fish"}` : undefined),
     }
-    expect(predictDefaultShell(withFish, "/work")).toBe("zsh")
+    expect(predictDefaultShell(withFish, "/work")).toBe("bash")
+    expect(predictDefaultShell(io, "/work")).toBe("zsh")
   })
 })
 

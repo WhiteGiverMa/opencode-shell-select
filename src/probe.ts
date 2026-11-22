@@ -260,8 +260,12 @@ export function predictDefaultShell(io: ProbeSystem, directory?: string): string
   const fromConfig = resolveCompatible(configured)
   if (fromConfig) return fromConfig
 
-  const fromEnv = resolveCompatible(io.env.SHELL)
-  if (fromEnv) return fromEnv
+  // Match ShellSelect.resolve: once `configShell` is set (even if missing or denied by `compat`),
+  // OpenCode falls back straight to platform defaults without consulting `process.env.SHELL`.
+  if (configured === undefined) {
+    const fromEnv = resolveCompatible(io.env.SHELL)
+    if (fromEnv) return fromEnv
+  }
 
   if (io.platform === "win32") {
     for (const candidate of ["pwsh", "powershell", "bash", "cmd"]) {
