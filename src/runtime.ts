@@ -1,5 +1,5 @@
 import { Tool } from "@opencode/plugin/effect"
-import { Context, Effect, Predicate, Schema, SchemaParser, SchemaTransformation, type JsonSchema } from "effect"
+import { Context, Effect, Predicate, Result, Schema, SchemaParser, SchemaTransformation, type JsonSchema } from "effect"
 import { normalizeShellID } from "./config.js"
 import type { ShellProfile, ShellSnapshot } from "./probe.js"
 
@@ -130,18 +130,35 @@ export function syncToolSchema(input: JsonSchema.JsonSchema, ids: readonly strin
 
 export type SelectShell = (id: string, sessionID: Tool.Context["sessionID"]) => Effect.Effect<ShellProfile, Tool.Error>
 
+export interface ShellToolInstance {
+  readonly select: SelectShell
+  readonly ref: typeof SelectedShellRef
+}
+
+export const unloadedShellSelection = () =>
+  new Tool.Error({ message: "Shell selection was unloaded. Retry without the shell parameter." })
+
 export function wrapShellTool(
   tool: Tool.Info,
   ids: readonly string[],
-  select: SelectShell,
+  selection: SelectShell | { readonly current: () => ShellToolInstance | undefined },
   defaultShell?: string,
 ): Tool.Info | undefined {
   const schema = shellInput(tool.input, ids)
   if (schema === undefined) return
+  const fixed = typeof selection === "function" ? { select: selection, ref: SelectedShellRef } : undefined
+  const current = typeof selection === "function" ? () => fixed : selection.current
   const execute = tool.execute
-  const run = (input: unknown, context: Tool.Context, requested?: ShellCallContext["requested"]) => {
+  const run = (
+    input: unknown,
+    context: Tool.Context,
+    ref: typeof SelectedShellRef | undefined,
+    requested?: ShellCallContext["requested"],
+  ) => {
+    const native = Effect.suspend(() => execute(input, context))
+    if (!ref) return native
     const call: ShellCallContext = requested ? { requested } : {}
-    return Effect.provideService(Effect.suspend(() => execute(input, context)), SelectedShellRef, call).pipe(
+    return Effect.provideService(native, ref, call).pipe(
       Effect.map((result) =>
         call.resolved === undefined
           ? result
@@ -153,14 +170,24 @@ export function wrapShellTool(
     ...tool,
     input: schema,
     description: shellDescription(tool.description, ids, defaultShell),
-    execute: (input: unknown, context) => {
-      if (!Predicate.isObject(input) || !Object.hasOwn(input, "shell")) return run(input, context)
+    execute: Effect.fnUntraced(function* (input: unknown, context: Tool.Context) {
+      let instance = current()
+      if (!Predicate.isObject(input) || !Object.hasOwn(input, "shell")) return yield* run(input, context, instance?.ref)
       const { shell, ...rest } = input
-      if (shell === undefined) return run(rest, context)
+      if (shell === undefined) return yield* run(rest, context, instance?.ref)
       const id = typeof shell === "string" ? normalizeShellID(shell) : ""
-      return select(id, context.sessionID).pipe(
-        Effect.flatMap(({ id, executable }) => run(rest, context, { id, executable })),
-      )
-    },
+      while (instance) {
+        const result = yield* Effect.result(instance.select(id, context.sessionID))
+        const latest = current()
+        // A live probe can yield to tool reload or instruction publication before it returns.
+        if (latest !== instance) {
+          instance = latest
+          continue
+        }
+        if (Result.isFailure(result)) return yield* result.failure
+        return yield* run(rest, context, instance.ref, result.success)
+      }
+      return yield* unloadedShellSelection()
+    }),
   }
 }

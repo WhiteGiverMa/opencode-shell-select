@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url"
 import { Tool } from "@opencode/plugin/effect"
 import type { Registration } from "@opencode/plugin/effect/registration"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
-import { Context, Effect, Layer, Predicate, Schema, type JsonSchema, type Scope } from "effect"
+import { Context, Effect, Exit, Layer, Predicate, Schema, Scope, type JsonSchema } from "effect"
 import { registerShellSelect } from "../src/server.js"
 import { wrapShellTool } from "../src/runtime.js"
 import type { ProbeSystem } from "../src/probe.js"
@@ -53,7 +53,7 @@ type HostLayerModule = {
 
 const root = process.env.OPENCODE_SOURCE_DIR
 if (!root) {
-  console.log("test:host: skipped (set OPENCODE_SOURCE_DIR to a local OpenCode v2.3.2 checkout)")
+  console.log("test:host: skipped (set OPENCODE_SOURCE_DIR to a local OpenCode v2 checkout)")
   process.exit(0)
 }
 const load = async (relative: string): Promise<unknown> => import(pathToFileURL(join(root, relative)).href)
@@ -63,7 +63,8 @@ const hostLayers = (await load("packages/util/src/effect/layer-node.ts")) as Hos
 const packageJSON = JSON.parse(await readFile(join(root, "packages/core/package.json"), "utf8")) as {
   readonly version?: unknown
 }
-assert(packageJSON.version === "2.3.2", `expected OpenCode core 2.3.2, found ${String(packageJSON.version)}`)
+const version = packageJSON.version
+assert(typeof version === "string" && /^2\./u.test(version), `expected OpenCode core v2, found ${String(version)}`)
 
 const shellSource = await readFile(join(root, "packages/core/src/shell.ts"), "utf8")
 assert(
@@ -118,7 +119,9 @@ const program = Effect.gen(function* () {
       hook: (_name, callback) => hooks.register("shell", "create.before", callback),
     },
   }
-  yield* registerShellSelect(host, io, () => 1_000)
+  const scope = yield* Effect.scope
+  const initial = yield* Scope.fork(scope)
+  yield* Effect.provideService(registerShellSelect(host, io, () => 1_000), Scope.Scope, initial)
 
   const direct = runtime.definition(harness.shell())
   assert(shellIDs(direct.inputSchema).join(",") === "bash,sh", "direct enum differs from the live probe")
@@ -186,6 +189,24 @@ const program = Effect.gen(function* () {
   assert(!harness.invocations.some((invocation) => invocation.command === "must-not-run"), "lost shell was executed")
   assert(shellIDs(runtime.definition(harness.shell()).inputSchema).join(",") === "sh", "reload retained lost enum")
 
+  yield* Scope.close(initial, Exit.void)
+  const replacement = "/replacement/bin/bash"
+  live.add(replacement)
+  const successor = yield* Scope.fork(scope)
+  const successorHost = { ...host, options: { shells: { bash: replacement } } }
+  yield* Effect.provideService(registerShellSelect(successorHost, io, () => 2_000), Scope.Scope, successor)
+  const handedOver = yield* runtime.execute(stale, { command: "handover", shell: "bash" }, toolContext())
+  assert(outputShell(handedOver) === replacement, "stale wrapper did not use the successor's live hook")
+  assert(handedOver.metadata?.shell === "bash", "stale wrapper did not record the shell profile")
+  const omitted = yield* runtime.execute(stale, { command: "handover-default" }, toolContext())
+  assert(outputShell(omitted) === "/configured/default-shell", "handover changed the native default shell")
+  assert(omitted.metadata?.shell === "default-shell", "handover did not record the native shell short name")
+
+  yield* Scope.close(successor, Exit.void)
+  const unloaded = yield* Effect.flip(runtime.execute(stale, { command: "unloaded", shell: "bash" }, toolContext()))
+  assert(unloaded.message.includes("unloaded"), "stale wrapper accepted a selection after permanent unload")
+  assert(!harness.invocations.some((invocation) => invocation.command === "unloaded"), "unloaded selection was executed")
+
   const codeInput = Schema.Struct({
     command: Schema.String,
     workdir: Schema.optionalKey(Schema.String),
@@ -210,4 +231,4 @@ const program = Effect.gen(function* () {
 })
 
 await Effect.runPromise(Effect.scoped(program).pipe(Effect.provide(layer)))
-console.log("test:host: OpenCode 2.3.2 Tool.runtime + PluginHooks + fiber isolation passed")
+console.log(`test:host: OpenCode ${version} Tool.runtime + PluginHooks + fiber isolation + stale snapshot handover passed`)

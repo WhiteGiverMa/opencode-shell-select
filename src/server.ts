@@ -11,12 +11,20 @@ import {
   shellDescription,
   shellShortName,
   syncToolSchema,
+  unloadedShellSelection,
   wrapShellTool,
+  type ShellToolInstance,
 } from "./runtime.js"
 
 export const id = "o3p.tool.shell-select"
 export const maxTrackedSessions = 512
 type SessionID = SessionHooks["prompt"]["sessionID"]
+type ActiveInstance = ShellToolInstance & { readonly token: symbol }
+
+const activeKey = Symbol.for("o3p.tool.shell-select/active")
+const globals = globalThis as typeof globalThis & { [activeKey]?: Map<string, ActiveInstance[]> }
+// Tool snapshots and the live hook can belong to different ESM generations. Keep only open scopes, newest last.
+const activeInstances = (globals[activeKey] ??= new Map<string, ActiveInstance[]>())
 
 export type ShellSelectHost = Pick<Context, "options" | "event"> & {
   readonly location: Pick<Context["location"], "directory" | "workspaceID">
@@ -35,9 +43,11 @@ export const registerShellSelect = Effect.fnUntraced(function* (
   // Most importantly, a disabled (or remote) instance registers no hook or transform at all.
   if (!config.enabled || ctx.location.workspaceID !== undefined) return
 
+  const { directory } = ctx.location
+  const currentInstance = () => activeInstances.get(directory)?.at(-1)
   const cache = makeProbeCache(config, io, now)
   let current = cache.read()
-  let defaultShell: string | undefined = predictDefaultShell(io, ctx.location.directory)
+  let defaultShell: string | undefined = predictDefaultShell(io, directory)
   let active = true
   let wrapped = false
   const ids = () => current.available.map((profile) => profile.id)
@@ -132,7 +142,7 @@ export const registerShellSelect = Effect.fnUntraced(function* (
     const fingerprint = current.fingerprint
     yield* refresh(lost || !previous ? "force" : "execution", lost)
     if (current.fingerprint !== fingerprint) yield* publish(sessionID)
-    if (!active) return yield* new Tool.Error({ message: "Shell selection was unloaded. Retry without the shell parameter." })
+    if (!active) return yield* unloadedShellSelection()
     if (lost) return yield* unavailable(requested, "is no longer executable")
 
     const selected = current.available.find((profile) => profile.id === requested)
@@ -147,10 +157,11 @@ export const registerShellSelect = Effect.fnUntraced(function* (
     return selected
   })
 
+  const instance: ActiveInstance = { token: Symbol(), select, ref: SelectedShellRef }
   yield* ctx.shell.hook("create.before", (event) =>
     Effect.gen(function* () {
-      if (!active) return
-      const call = yield* SelectedShellRef
+      if (!active || currentInstance()?.token !== instance.token) return
+      const call = yield* instance.ref
       // Unrelated terminal/process creation must remain completely untouched.
       if (!call) return
       if (call.requested) {
@@ -167,7 +178,7 @@ export const registerShellSelect = Effect.fnUntraced(function* (
   yield* ctx.tool.transform((editor) => {
     wrapped = false
     editor.update("shell", (tool) => {
-      const next = wrapShellTool(tool, ids(), select, defaultShell)
+      const next = wrapShellTool(tool, ids(), { current: currentInstance }, defaultShell)
       if (!next) return
       wrapped = true
       tool.input = next.input
@@ -210,12 +221,25 @@ export const registerShellSelect = Effect.fnUntraced(function* (
     Effect.forkScoped({ startImmediately: true }),
   )
 
-  yield* Effect.addFinalizer(() =>
+  yield* Effect.acquireRelease(
     Effect.sync(() => {
-      active = false
-      published.clear()
-      cache.invalidate()
+      const instances = activeInstances.get(directory)
+      if (instances) instances.push(instance)
+      else activeInstances.set(directory, [instance])
     }),
+    () =>
+      Effect.sync(() => {
+        active = false
+        published.clear()
+        cache.invalidate()
+        const instances = activeInstances.get(directory)
+        if (!instances) return
+        const index = instances.findIndex((entry) => entry.token === instance.token)
+        if (index === -1) return
+        // Closing a superseded scope must not remove the live successor or restore a closed scope.
+        instances.splice(index, 1)
+        if (instances.length === 0) activeInstances.delete(directory)
+      }),
   )
 })
 

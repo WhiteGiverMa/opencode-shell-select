@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { join } from "node:path"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { Tool } from "@opencode/plugin/effect"
 import { Workspace } from "@opencode/schema/workspace"
-import { Effect, Predicate, Schema, type JsonSchema } from "effect"
+import { Effect, Exit, Predicate, Schema, Scope, type JsonSchema } from "effect"
 import type { ProbeSystem } from "../src/probe.js"
 import { maxTrackedSessions, registerShellSelect } from "../src/server.js"
 import { contextEvent, makeHarness, promptEvent, toolContext } from "./harness.js"
@@ -468,5 +471,188 @@ describe("scope cleanup", () => {
     )
     expect(error.message).toContain("unloaded")
     expect(harness.invocations).toEqual([])
+  })
+})
+
+describe("hot reload handover", () => {
+  const unloaded = "Shell selection was unloaded. Retry without the shell parameter."
+  const hasRegistration = (directory: string) => {
+    const registry = Reflect.get(globalThis, Symbol.for("o3p.tool.shell-select/active")) as ReadonlyMap<string, unknown> | undefined
+    return registry?.has(directory) ?? false
+  }
+
+  test("a closed scope's snapshot uses the re-imported module's live selector and hook", async () => {
+    const { harness, register } = setup()
+    const stale = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* register()
+          return harness.shell()
+        }),
+      ),
+    )
+    expect(harness.hookCounts()).toEqual({ session: 0, shell: 0, transforms: 0 })
+
+    // Bun deduplicates file imports with different query strings. A separate bundle re-evaluates the whole module.
+    const directory = await mkdtemp(join(import.meta.dir, ".shell-select-reload-"))
+    try {
+      const build = await Bun.build({
+        entrypoints: [fileURLToPath(new URL("../src/server.ts", import.meta.url))],
+        outdir: directory,
+        target: "node",
+        external: ["@opencode/plugin", "@opencode/plugin/*", "effect", "effect/*"],
+        plugins: [
+          {
+            name: "distinct-shell-reference",
+            setup(build) {
+              build.onLoad({ filter: /[/\\]runtime\.ts$/u }, async ({ path }) => {
+                // Effect 4 currently looks up References by key; make stale ref injection fail even with that lookup.
+                const key = "o3p.tool.shell-select/SelectedShell"
+                const source = await Bun.file(path).text()
+                if (!source.includes(key)) throw new Error("SelectedShellRef fixture key is missing")
+                return { contents: source.replace(key, `${key}/reload-test`), loader: "ts" }
+              })
+            },
+          },
+        ],
+      })
+      if (!build.success) throw new AggregateError(build.logs, "Could not build the replacement plugin module")
+      const reloaded = (await import(pathToFileURL(join(directory, "server.js")).href)) as typeof import("../src/server.js")
+      expect(reloaded.registerShellSelect).not.toBe(registerShellSelect)
+
+      const probe = fakePOSIX([])
+      const replacement = "/replacement/bin/bash"
+      const host = { ...harness.ctx, options: { shells: { bash: replacement } } }
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            yield* reloaded.registerShellSelect(host, probe.io, () => 0)
+            probe.live.add(replacement)
+            const context = toolContext()
+            const selected = yield* stale.execute({ command: "reloaded-bash", shell: "bash" }, context)
+            expect(selected.output).toEqual({ shell: replacement, command: "reloaded-bash" })
+            expect(selected.metadata).toEqual({ preserved: true, shell: "bash" })
+            expect(harness.puts[0]).toMatchObject({ sessionID: context.sessionID })
+
+            for (const input of [{ command: "default" }, { command: "default", shell: undefined }]) {
+              const fallback = yield* stale.execute(input, context)
+              expect(fallback.output).toEqual({ shell: "/configured/default-shell", command: "default" })
+              expect(fallback.metadata).toEqual({ preserved: true, shell: "default-shell" })
+            }
+          }),
+        ),
+      )
+
+      const error = await Effect.runPromise(
+        Effect.flip(stale.execute({ command: "must-not-run", shell: "bash" }, toolContext())),
+      )
+      expect(error).toBeInstanceOf(Tool.Error)
+      expect(error.message).toBe(unloaded)
+      expect(harness.invocations.map((item) => item.command)).toEqual(["reloaded-bash", "default", "default"])
+      expect(hasRegistration(harness.ctx.location.directory)).toBe(false)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  for (const order of ["oldest first", "newest first"]) {
+    test(`overlapping scopes retain the latest live registration when closed ${order}`, async () => {
+      const { harness, register } = setup()
+      const probe = fakePOSIX([])
+      const replacement = "/replacement/bin/bash"
+      probe.live.add(replacement)
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const scope = yield* Effect.scope
+            const first = yield* Scope.fork(scope)
+            yield* Effect.provideService(register(), Scope.Scope, first)
+            const stale = harness.shell()
+            const second = yield* Scope.fork(scope)
+            const host = { ...harness.ctx, options: { shells: { bash: replacement } } }
+            yield* Effect.provideService(registerShellSelect(host, probe.io, () => 0), Scope.Scope, second)
+            const context = toolContext()
+            const input = { command: "overlap", shell: "bash" }
+
+            expect((yield* stale.execute(input, context)).output).toEqual({ shell: replacement, command: "overlap" })
+            const oldestFirst = order === "oldest first"
+            yield* Scope.close(oldestFirst ? first : second, Exit.void)
+            const expected = oldestFirst ? replacement : "/bin/bash"
+            expect((yield* stale.execute(input, context)).output).toEqual({ shell: expected, command: "overlap" })
+
+            yield* Scope.close(oldestFirst ? second : first, Exit.void)
+            const error = yield* Effect.flip(stale.execute({ command: "must-not-run", shell: "bash" }, context))
+            expect(error.message).toBe(unloaded)
+            expect(harness.invocations.map((item) => item.shell)).toEqual([replacement, expected])
+            expect(hasRegistration(harness.ctx.location.directory)).toBe(false)
+          }),
+        ),
+      )
+    })
+  }
+
+  test("an explicit call reselects if its instance changes during a live probe", async () => {
+    const { harness, io, live } = setup()
+    const replacement = "/replacement/bin/bash"
+    const host = { ...harness.ctx, options: { shells: { bash: replacement } } }
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scope = yield* Effect.scope
+          const first = yield* Scope.fork(scope)
+          const successor = yield* Scope.fork(scope)
+          const oldHost = {
+            ...harness.ctx,
+            tool: {
+              ...harness.ctx.tool,
+              reload: () =>
+                Effect.gen(function* () {
+                  yield* Scope.close(first, Exit.void)
+                  yield* Effect.provideService(registerShellSelect(host, io, () => 0), Scope.Scope, successor)
+                }),
+            },
+          }
+          yield* Effect.provideService(registerShellSelect(oldHost, io, () => 0), Scope.Scope, first)
+          const stale = harness.shell()
+          live.delete("/bin/bash")
+          live.add(replacement)
+          const result = yield* stale.execute({ command: "refresh-handover", shell: "bash" }, toolContext())
+          expect(result.output).toEqual({ shell: replacement, command: "refresh-handover" })
+          expect(result.metadata?.shell).toBe("bash")
+          expect(harness.invocations.map((item) => item.shell)).toEqual([replacement])
+        }),
+      ),
+    )
+  })
+
+  test("a stale snapshot cannot select shells through another location or a remote workspace", async () => {
+    const { harness, register } = setup()
+    const other = setup()
+    const { io } = fakePOSIX()
+    const remote = makeHarness({
+      directory: harness.ctx.location.directory,
+      workspaceID: Workspace.ID.create(),
+      pluginOptions: { shells: ["bash"] },
+    })
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const stale = yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* register()
+              return harness.shell()
+            }),
+          )
+          yield* other.register()
+          yield* registerShellSelect(remote.ctx, io, () => 0)
+
+          const error = yield* Effect.flip(stale.execute({ command: "must-not-run", shell: "bash" }, toolContext()))
+          expect(error.message).toBe(unloaded)
+          expect(harness.invocations).toEqual([])
+          expect(other.harness.invocations).toEqual([])
+          expect(remote.invocations).toEqual([])
+        }),
+      ),
+    )
   })
 })

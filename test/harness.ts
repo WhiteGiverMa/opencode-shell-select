@@ -98,6 +98,7 @@ export function makeHarness(options: {
   readonly codeMode?: boolean
   readonly nativeDescription?: string
   readonly defaultShell?: string
+  readonly directory?: string
   readonly workspaceID?: PluginContext["location"]["workspaceID"]
   readonly create?: (event: ShellCreateBefore) => Effect.Effect<void>
 } = {}): Harness {
@@ -196,7 +197,7 @@ export function makeHarness(options: {
   const ctx: ShellSelectHost = {
     options: options.pluginOptions as PluginContext["options"],
     location: {
-      directory: Schema.decodeUnknownSync(Location.Ref.fields.directory)("/work"),
+      directory: Schema.decodeUnknownSync(Location.Ref.fields.directory)(options.directory ?? `/work/${crypto.randomUUID()}`),
       ...(options.workspaceID !== undefined ? { workspaceID: options.workspaceID } : {}),
     },
     event: { subscribe },
