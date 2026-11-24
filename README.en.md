@@ -12,6 +12,7 @@ Per-call shell selection plugin (`o3p.tool.shell-select`) for OpenCode v2's buil
 - Supports Git Bash (including `OPENCODE_GIT_BASH_PATH`), PowerShell, CMD, and WindowsApps App Execution Aliases on Windows; supports Bash, Zsh, sh, dash, ksh, pwsh, and custom profiles on POSIX.
 - Uses a per-call fiber-local `Context.Reference` state box with the native `shell.create.before` hook so concurrent explicit calls, default calls, and unrelated `Shell.create` invocations never cross-contaminate `event.shell` or result metadata.
 - Re-checks target availability before every explicit execution; if a shell disappears, refreshes the cache, reloads the tool definition, and returns a `Tool.Error` listing currently available shells instead of silently falling back to the default shell.
+- After a hot reload, a tool captured by an in-flight request uses the current plugin instance for the same location. If no instance takes over, an explicit selection fails without running in the default shell.
 - Publishes available shells and the default shell via native `session.instructions.entry`: predicts the default shell at load time using OpenCode's config/env rules so a fresh session includes the full list in its initial instruction baseline (avoiding spurious `Instructions updated` notices on turn 1), while reconciling against the `context` hook and publishing an update only when the available set or default actually changes. Deduplicates per session by fingerprint, preserves persisted entries across hot reloads, and bounds the tracking map.
 - Synchronizes tool descriptions and JSON Schema across `context`, `compaction`, and `generate` while retaining the native default shell name; mid-session config changes automatically publish a new instruction entry.
 - Skips registration on remote workspaces, since the server cannot probe executables on a remote host.
@@ -33,7 +34,7 @@ Turning `Header` off still allows a standalone workdir header (`# in <dir>`); se
 
 ## Installation & Build
 
-Requires Bun and OpenCode v2 (source-audited and host-verified against OpenCode `2.3.2`+).
+Requires Bun and OpenCode v2. The initial verification baseline was `2.3.2`; hot-reload handover has been verified on `2.4.1`.
 
 ```bash
 bun install
@@ -122,7 +123,7 @@ bun run test:host
 ```
 
 - `smoke` imports the built `dist/server.js` and `dist/tui.js`, verifies exports, TUI dependency isolation, silent degradation on official frontends, and runs real detected shells through selection/pass-through/disabled modes.
-- `test:host` loads OpenCode's `Tool.runtime`, `PluginHooks`, and Effect Layer directly to verify schema transforms, decoding, concurrent isolation, and missing-shell handling; set `OPENCODE_SOURCE_DIR=/path/to/opencode`.
+- `test:host` loads OpenCode's `Tool.runtime`, `PluginHooks`, and Effect Layer directly to verify schema transforms, decoding, concurrent isolation, missing-shell handling, and stale tool snapshots across hot reload; set `OPENCODE_SOURCE_DIR=/path/to/opencode`.
 
 Quick manual check in OpenCode v2: open a new session with the plugin loaded, have the model run one call with `"shell": "bash"` (or another detected ID), one call omitting `shell`, and one with a nonexistent ID (which should return a tool error listing available shells). With `full_codemode` enabled, verify the same through `tools.shell` inside `execute`.
 

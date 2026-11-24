@@ -12,6 +12,7 @@ OpenCode v2 内置 `shell` 工具的逐次调用 Shell 选择插件（`o3p.tool.
 - Windows 支持 Git Bash（含 `OPENCODE_GIT_BASH_PATH`）、PowerShell、CMD 和 WindowsApps App Execution Alias；POSIX 支持 Bash、Zsh、sh、dash、ksh、pwsh及自定义配置。
 - 使用每次调用独立的 fiber-local `Context.Reference` 状态盒与原生 `shell.create.before` hook；显式选择、默认调用及无关 `Shell.create` 并行时，`event.shell` 和结果 metadata 均互不串扰。
 - 每次显式选择都在执行前检查目标是否仍然存在；失效后会刷新缓存、重载工具并返回列出当前可用项的 `Tool.Error`，**不会静默退回默认 Shell**。
+- 热重载后，已被本轮请求捕获的旧工具会使用同一 location 当前实例的 Shell 配置与 hook；若插件已卸载且没有接棒实例，显式选壳会拒绝执行，而不是回退到默认 Shell。
 - 通过原生 `session.instructions.entry` 发布可用项和默认 Shell：插件加载时即参照 OpenCode 的配置/环境规则预判默认 Shell，使首个全新会话的第一轮就能直接把完整内容写入初始指令基线（不会在首轮无故弹出 `Instructions updated`）；同时保留与 `context` 钩子的校对机制，仅当可用 Shell 列表或默认 Shell 配置真正变化（或与预判不一致）时才发布原生指令增量。按会话指纹去重、热重载不覆盖已有持久化 entry，并限制跟踪表大小。
 - 在 `context` / `compaction` / `generate` 中同步工具描述与 JSON Schema，保留原生默认 Shell 名称；配置中途变更会自动发布新的指令 entry。
 - 远程 workspace 不注册本插件，因为服务端无法探测远端机器的可执行文件。
@@ -33,7 +34,7 @@ OpenCode v2 内置 `shell` 工具的逐次调用 Shell 选择插件（`o3p.tool.
 
 ## 安装与构建
 
-需要 Bun 与 OpenCode v2；源码审计及真实宿主验证基线为 OpenCode `2.3.2`。
+需要 Bun 与 OpenCode v2；初始验证基线为 `2.3.2`，热重载接力已在 `2.4.1` 上验证。
 
 ```bash
 bun install
@@ -122,7 +123,7 @@ bun run test:host
 ```
 
 - `smoke` 导入实际构建的 `dist/server.js` 与 `dist/tui.js`，检查导出、TUI 依赖隔离及官方前端上的静默降级，并在 harness 中验证选择/透传与禁用模式，用探测到的真实 Shell 执行命令。
-- `test:host` 直接加载 OpenCode 2.3.2 的 `Tool.runtime`、`PluginHooks` 与 Effect Layer，验证真实 Schema 转换、解码、并发隔离和 Shell 消失处理；需要设置 `OPENCODE_SOURCE_DIR=/path/to/opencode`。
+- `test:host` 直接加载 OpenCode v2 的 `Tool.runtime`、`PluginHooks` 与 Effect Layer，验证真实 Schema 转换、解码、并发隔离、Shell 消失处理和热重载后旧工具快照接力；需要设置 `OPENCODE_SOURCE_DIR=/path/to/opencode`。
 
 在 OpenCode v2 中快速手测：挂载插件后打开一个新会话，让模型分别执行一次带 `"shell":"bash"`（或当前枚举中的其他值）和一次省略 `shell` 的调用；再请求一个不存在的 ID，应看到列出当前可用 Shell 的工具错误。开启 `full_codemode` 时，可在 `execute` 中调用 `tools.shell` 做同样验证。
 
