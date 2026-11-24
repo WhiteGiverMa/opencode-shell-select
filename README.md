@@ -1,5 +1,7 @@
 # opencode-shell-select
 
+[English](README.en.md) | 简体中文
+
 OpenCode v2 内置 `shell` 工具的逐次调用 Shell 选择插件（`o3p.tool.shell-select`）。同时支持直接工具调用与 `full_codemode` 中的 `tools.shell`，不改变 OpenCode 原有的默认 Shell 配置。
 
 ## 功能
